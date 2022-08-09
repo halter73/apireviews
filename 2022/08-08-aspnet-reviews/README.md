@@ -174,7 +174,142 @@ public class RemoteAuthenticationService<TRemoteAuthenticationState, TAccount, T
 
 **Approved** | [#aspnetcore/41955](https://github.com/dotnet/aspnetcore/issues/41955#issuecomment-1208656295)
 
-I made two minor adjustments to this API after the meeting.
+API Review Notes:
 
-> Edit: Let's not do the `OutputCacheAttribute.VaryByQueryKeys` to `VaryByQuery` rename because then it's not plural, and `VaryByQueries` would be needlessly confusing.
-> Edit 2: Rename `headers` param to `headerNames`.
+1. `Cache()` being overridden without an explicit call to `NoCache()` is weird. Let's make sure that doesn't happen.
+1. Make sure unit tests can construct contexts.
+1. Add `VaryByRouteValue`
+    1. Are we worried that `CacheVaryByRules.RouteValues` would imply the `StringValues` are the actual values and not the keys like they are supposed to be? We use `CacheVaryByRules.QueryKeys` not `CacheVaryByRules.Query` or `CacheVaryByRules.QueryValues`.
+        1. Maybe, but let's not make this overly verbose. The "query" or querystring is a thing but we cannot say `RouteKeys` because the concept is called "RouteValues". It's on `HttpRequest.RouteValues`. The querystring is not on `HttpRequest.QueryValues` and headers are not `HttpRequest.HeaderValues`. It's just `HttpRequest.Query` and `HttpRequest.Headers`, so these are different.
+        1. This feedback applies to all the APIs that refer just to "RouteValues" to mean "RouteValueNames".
+        1. Let's be very clear in the doc comments about this.
+    1. Then should we rename `VaryByQueryKeys` -> `VaryByQuery`?
+        1. No, because then it's not plural, and `VaryByQueries` would be needlessly confusing.
+
+API Approved!
+
+```diff
+namespace Microsoft.AspNetCore.Builder;
+
+public static class OutputCacheApplicationBuilderExtensions
+{
+    public static IApplicationBuilder UseOutputCache(this IApplicationBuilder app);
+}
+ 
+namespace Microsoft.Extensions.DependencyInjection;
+
+public static class OutputCacheServiceCollectionExtensions
+{
+    public static IServiceCollection AddOutputCache(this IServiceCollection services);
+    public static IServiceCollection AddOutputCache(this IServiceCollection services, Action<OutputCacheOptions> configureOptions);
+}
+
+public static class OutputCacheConventionBuilderExtensions
+{
+    public static TBuilder CacheOutput<TBuilder>(this TBuilder builder) where TBuilder : IEndpointConventionBuilder;
+    public static TBuilder CacheOutput<TBuilder>(this TBuilder builder, IOutputCachePolicy policy) where TBuilder : IEndpointConventionBuilder;
+    public static TBuilder CacheOutput<TBuilder>(this TBuilder builder, Action<OutputCachePolicyBuilder> policy) where TBuilder : IEndpointConventionBuilder;
+    public static TBuilder CacheOutput<TBuilder>(this TBuilder builder, string policyName) where TBuilder : IEndpointConventionBuilder;
+}
+
+namespace Microsoft.AspNetCore.OutputCaching;
+
+public sealed class OutputCacheOptions
+{
+    public OutputCacheOptions();
+
+    public long SizeLimit { get; set; }
+    public long MaximumBodySize { get; set; }
+    public TimeSpan DefaultExpirationTimeSpan { get; set; }
+    public bool UseCaseSensitivePaths{ get; set; }
+    public IServiceProvider ApplicationServices { get; }
+    public void AddPolicy(string name, IOutputCachePolicy policy);
+    public void AddPolicy(string name, Action<OutputCachePolicyBuilder> build);
+
+    public void AddBasePolicy(IOutputCachePolicy policy);
+    public void AddBasePolicy(Action<OutputCachePolicyBuilder> build);
+ }
+ 
+ public interface IOutputCachePolicy
+ {
+    ValueTask CacheRequestAsync(OutputCacheContext context, CancellationToken cancellationToken);
+    ValueTask ServeFromCacheAsync(OutputCacheContext context, CancellationToken cancellationToken);
+    ValueTask ServeResponseAsync(OutputCacheContext context, CancellationToken cancellationToken);
+ }
+ 
+public sealed class OutputCachePolicyBuilder
+{
+    public OutputCachePolicyBuilder();
+    public OutputCachePolicyBuilder AddPolicy(Type policyType);
+    public OutputCachePolicyBuilder AddPolicy<T>() where T : IOutputCachePolicy;
+    public OutputCachePolicyBuilder With(Func<OutputCacheContext, bool> predicate);
+    public OutputCachePolicyBuilder With(Func<OutputCacheContext, CancellationToken, ValueTask<bool>> predicate);
+    public OutputCachePolicyBuilder Tag(params string[] tags);
+    public OutputCachePolicyBuilder Expire(TimeSpan expiration);
++   public OutputCachePolicyBuilder Cache();
+    public OutputCachePolicyBuilder AllowLocking(bool lockResponse = true);
+    public OutputCachePolicyBuilder Clear();
+    public OutputCachePolicyBuilder NoCache();
++    public OutputCachePolicyBuilder VaryByRouteValue(params string[] routeValueNames);
+    public OutputCachePolicyBuilder VaryByQuery(params string[] queryKeys);
+-    public OutputCachePolicyBuilder VaryByHeader(params string[] headers);
++    public OutputCachePolicyBuilder VaryByHeader(params string[] headerNames);
+    public OutputCachePolicyBuilder VaryByValue(Func<HttpContext, string> varyBy);
+    public OutputCachePolicyBuilder VaryByValue(Func<HttpContext, CancellationToken, ValueTask<string>> varyBy);
+    public OutputCachePolicyBuilder VaryByValue(Func<HttpContext, KeyValuePair<string, string>> varyBy);
+    public OutputCachePolicyBuilder VaryByValue(Func<HttpContext, CancellationToken, ValueTask<KeyValuePair<string, string>>> varyBy);
+}
+ 
+public sealed class OutputCacheContext
+{
+    public OutputCacheContext();
+    public bool EnableOutputCaching { get; set; }
+    public bool AllowCacheLookup { get; set; }
+    public bool AllowCacheStorage { get; set; }
+    public bool AllowLocking { get; set; }
+-    public required HttpContext HttpContext { get; }
++    public required HttpContext HttpContext { get; init; }
+-    public DateTimeOffset? ResponseTime { get; }
++    public DateTimeOffset? ResponseTime { get; set; }
+    public CacheVaryByRules CacheVaryByRules { get; }
+    public HashSet<string> Tags { get; }
+    public TimeSpan? ResponseExpirationTimeSpan { get; set; }
+}
+ 
+public sealed class CacheVaryByRules
+{
+    public CacheVaryByRules();
+    public IDictionary<string, string> VaryByCustom { get; set }
++    public StringValues RouteValues { get; set; }
+    public StringValues Headers { get; set; }
+    public StringValues QueryKeys { get; set; }
+    public StringValues VaryByPrefix { get; set; }
+}
+ 
+public sealed class OutputCacheAttribute : Attribute
+{
+    public OutputCacheAttribute();
+    public int Duration { get; init; }
+    public bool NoStore { get; init; }
++    public string[]? VaryByRouteValues { get; init; }
+    public string[]? VaryByQueryKeys { get; init; }
+    public string[]? VaryByHeaders { get; init; }
+    public string? PolicyName { get; init; }
+}
+ 
+public interface IOutputCacheFeature
+{
+    OutputCacheContext Context { get; }
+}
+
+public interface IOutputCacheStore
+{
+    ValueTask EvictByTagAsync(string tag, CancellationToken cancellationToken);
+    ValueTask<byte[]?> GetAsync(string key, CancellationToken cancellationToken);
+    ValueTask SetAsync(string key, byte[] value, string[]? tags, TimeSpan validFor, CancellationToken cancellationToken);
+}
+```
+
+Edit: Let's not do the `OutputCacheAttribute.VaryByQueryKeys` to `VaryByQuery` rename because then it's not plural, and `VaryByQueries` would be needlessly confusing.
+
+Edit 2: Rename `headers` param to `headerNames`.
